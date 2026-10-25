@@ -1,0 +1,19 @@
+[ExtensionOf(formStr(LedgerAllocationRequest))]
+final class LedgerAllocationRequest_SC_Form_Extension
+{
+    public void init()
+    {
+        next init();
+
+        editProcessOptions.selection(LedgerAllocationProcessMode::ProposalOnly);
+        editProcessOptions.allowEdit(false);
+    }
+
+    public void closeOk()
+    {
+        editProcessOptions.selection(LedgerAllocationProcessMode::ProposalOnly);
+
+        next closeOk();
+    }
+
+}
