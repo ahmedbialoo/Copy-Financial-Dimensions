@@ -1,0 +1,12 @@
+[ExtensionOf(classStr(LedgerAllocationRequest))]
+final class LedgerAllocationRequest_SingleClic_Extension
+{
+   
+    public void run()
+    {
+        this.parmProcessOptions(LedgerAllocationProcessMode::ProposalOnly);
+
+        next run();
+    }
+
+}
