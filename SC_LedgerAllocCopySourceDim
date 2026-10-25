@@ -1,0 +1,371 @@
+public class SC_LedgerAllocCopySourceDim
+{
+    private const AmountCur AmountTolerance = 0.02;
+
+    public static void main(Args _args)
+    {
+        SC_LedgerAllocCopySourceDim copier = new SC_LedgerAllocCopySourceDim();
+        LedgerJournalTable ledgerJournalTable = copier.journalTable(_args);
+
+        if (!ledgerJournalTable)
+        {
+            throw error("Open an allocation journal line and try again.");
+        }
+
+        if (ledgerJournalTable.JournalType != LedgerJournalType::Allocation)
+        {
+            throw error(strFmt("Journal %1 is not an allocation journal.", ledgerJournalTable.JournalNum));
+        }
+
+        if (ledgerJournalTable.Posted)
+        {
+            throw error(strFmt("Journal %1 is already posted.", ledgerJournalTable.JournalNum));
+        }
+
+        int updated = copier.copyDimensions(ledgerJournalTable);
+
+        if (updated)
+        {
+            info(strFmt("Updated %1 allocation line(s) on journal %2. Destination dimensions were kept, and blank dimensions were filled from the source line. The journal can now be posted.", updated, ledgerJournalTable.JournalNum));
+        }
+        else
+        {
+            info(strFmt("No allocation lines on journal %1 needed dimension changes. The journal can now be posted.", ledgerJournalTable.JournalNum));
+        }
+
+        copier.refreshCaller(_args);
+    }
+
+    private LedgerJournalTable journalTable(Args _args)
+    {
+        LedgerJournalTable ledgerJournalTable;
+
+        if (_args && _args.record())
+        {
+            switch (_args.dataset())
+            {
+                case tableNum(LedgerJournalTrans):
+                    LedgerJournalTrans ledgerJournalTrans = _args.record() as LedgerJournalTrans;
+                    ledgerJournalTable = LedgerJournalTable::find(ledgerJournalTrans.JournalNum);
+                    break;
+
+                case tableNum(LedgerJournalTable):
+                    ledgerJournalTable = _args.record() as LedgerJournalTable;
+                    break;
+            }
+        }
+
+        return ledgerJournalTable;
+    }
+
+    private int copyDimensions(LedgerJournalTable _ledgerJournalTable)
+    {
+        Map groups = new Map(Types::String, Types::Class);
+        LedgerJournalTrans ledgerJournalTrans;
+        int updated;
+
+        while select RecId, Voucher, TransDate, LineNum from ledgerJournalTrans
+            order by ledgerJournalTrans.Voucher, ledgerJournalTrans.TransDate, ledgerJournalTrans.LineNum, ledgerJournalTrans.RecId
+            where ledgerJournalTrans.JournalNum == _ledgerJournalTable.JournalNum
+        {
+            str groupKey = ledgerJournalTrans.Voucher + '|' + date2StrXpp(ledgerJournalTrans.TransDate);
+            List lineRecIds;
+
+            if (groups.exists(groupKey))
+            {
+                lineRecIds = groups.lookup(groupKey);
+            }
+            else
+            {
+                lineRecIds = new List(Types::Int64);
+            }
+
+            lineRecIds.addEnd(ledgerJournalTrans.RecId);
+            groups.insert(groupKey, lineRecIds);
+        }
+
+        ttsbegin;
+
+        MapEnumerator groupEnumerator = groups.getEnumerator();
+        while (groupEnumerator.moveNext())
+        {
+            List voucherLineRecIds = groupEnumerator.currentValue();
+            updated += this.copyVoucher(voucherLineRecIds, _ledgerJournalTable.JournalNum);
+        }
+
+        this.markDimensionsCopied(_ledgerJournalTable.JournalNum);
+
+        ttscommit;
+
+        return updated;
+    }
+
+    private void markDimensionsCopied(LedgerJournalId _journalNum)
+    {
+        LedgerJournalTable ledgerJournalTable = LedgerJournalTable::find(_journalNum, true);
+
+        if (ledgerJournalTable && ledgerJournalTable.SC_SourceDimCopied != NoYes::Yes)
+        {
+            ledgerJournalTable.SC_SourceDimCopied = NoYes::Yes;
+            ledgerJournalTable.update();
+        }
+    }
+
+    private int copyVoucher(List _lineRecIds, LedgerJournalId _journalNum)
+    {
+        List lines = new List(Types::Record);
+        List pending = new List(Types::Record);
+        Set matchedRecIds = new Set(Types::Int64);
+        ListEnumerator recIdEnumerator = _lineRecIds.getEnumerator();
+        int pendingSign;
+        int updated;
+        Voucher voucher;
+        TransDate transDate;
+
+        while (recIdEnumerator.moveNext())
+        {
+            LedgerJournalTrans ledgerJournalTrans = LedgerJournalTrans::findRecId(recIdEnumerator.current(), false);
+            lines.addEnd(ledgerJournalTrans);
+
+            if (!voucher)
+            {
+                voucher = ledgerJournalTrans.Voucher;
+                transDate = ledgerJournalTrans.TransDate;
+            }
+        }
+
+        ListEnumerator lineEnumerator = lines.getEnumerator();
+        while (lineEnumerator.moveNext())
+        {
+            LedgerJournalTrans ledgerJournalTrans = lineEnumerator.current();
+            int lineSign = this.lineSign(ledgerJournalTrans);
+
+            if (!lineSign)
+            {
+                continue;
+            }
+
+            if (pending.elements() == 0 || lineSign == pendingSign)
+            {
+                pending.addEnd(ledgerJournalTrans);
+                pendingSign = lineSign;
+            }
+            else if (abs(this.sumAmount(pending) - this.lineAmount(ledgerJournalTrans)) <= AmountTolerance)
+            {
+                DimensionDefault sourceDimension = this.defaultDimension(ledgerJournalTrans);
+                DataAreaId sourceCompany = this.lineCompany(ledgerJournalTrans);
+
+                updated += this.applySourceDimension(pending, sourceDimension, sourceCompany);
+                this.addRecIds(matchedRecIds, pending);
+                matchedRecIds.add(ledgerJournalTrans.RecId);
+
+                pending = new List(Types::Record);
+                pendingSign = 0;
+            }
+            else
+            {
+                pending.addEnd(ledgerJournalTrans);
+                pendingSign = lineSign;
+            }
+        }
+
+        if (pending.elements())
+        {
+            updated += this.applyAllocationTableSource(lines, matchedRecIds, _journalNum, voucher, transDate);
+        }
+
+        return updated;
+    }
+
+    private int applySourceDimension(List _destinationLines, DimensionDefault _sourceDimension, DataAreaId _sourceCompany)
+    {
+        int updated;
+
+        if (!_sourceDimension)
+        {
+            return updated;
+        }
+
+        ListEnumerator lineEnumerator = _destinationLines.getEnumerator();
+        while (lineEnumerator.moveNext())
+        {
+            LedgerJournalTrans destination = lineEnumerator.current();
+
+            if (this.mergeLine(destination.RecId, _sourceDimension, _sourceCompany))
+            {
+                updated++;
+            }
+        }
+
+        return updated;
+    }
+
+    private int applyAllocationTableSource(
+        List _lines,
+        Set _matchedRecIds,
+        LedgerJournalId _journalNum,
+        Voucher _voucher,
+        TransDate _transDate)
+    {
+        LedgerJournalTrans_Allocation ledgerJournalTransAllocation = LedgerJournalTrans_Allocation::find(_journalNum, _voucher, _transDate);
+        int updated;
+
+        if (!ledgerJournalTransAllocation.SourceDimension)
+        {
+            return updated;
+        }
+
+        List unmatched = new List(Types::Record);
+        ListEnumerator lineEnumerator = _lines.getEnumerator();
+
+        while (lineEnumerator.moveNext())
+        {
+            LedgerJournalTrans ledgerJournalTrans = lineEnumerator.current();
+
+            if (!_matchedRecIds.in(ledgerJournalTrans.RecId))
+            {
+                unmatched.addEnd(ledgerJournalTrans);
+            }
+        }
+
+        updated = this.applySourceDimension(unmatched, ledgerJournalTransAllocation.SourceDimension, curExt());
+
+        return updated;
+    }
+
+    private boolean mergeLine(RecId _ledgerJournalTransRecId, DimensionDefault _sourceDimension, DataAreaId _sourceCompany)
+    {
+        boolean updated;
+        LedgerJournalTrans ledgerJournalTrans = LedgerJournalTrans::findRecId(_ledgerJournalTransRecId, true);
+
+        if (!ledgerJournalTrans || !ledgerJournalTrans.LedgerDimension || !_sourceDimension)
+        {
+            return updated;
+        }
+
+        DataAreaId targetCompany = this.lineCompany(ledgerJournalTrans);
+        LedgerDimensionAccount newLedgerDimension;
+
+        changecompany(targetCompany)
+        {
+            DimensionDefault sourceDimension = _sourceDimension;
+
+            if (targetCompany != _sourceCompany)
+            {
+                sourceDimension = LedgerDimensionDefaultFacade::getDefaultDimensionUsingSharedAttributes(
+                    _sourceDimension,
+                    _sourceCompany,
+                    targetCompany);
+            }
+
+            if (sourceDimension)
+            {
+                DimensionDefault lineDimension = LedgerDimensionFacade::getDefaultDimensionFromLedgerDimension(ledgerJournalTrans.LedgerDimension);
+                DimensionDefault mergedDimension = LedgerDimensionDefaultFacade::serviceMergeDefaultDimensions(lineDimension, sourceDimension);
+
+                if (mergedDimension && mergedDimension != lineDimension)
+                {
+                    LedgerDimensionDefaultAccount defaultAccount = LedgerDefaultAccountHelper::getDefaultAccountFromLedgerDimension(ledgerJournalTrans.LedgerDimension);
+                    newLedgerDimension = LedgerDimensionFacade::serviceCreateLedgerDimension(defaultAccount, mergedDimension);
+                }
+            }
+        }
+
+        if (newLedgerDimension && newLedgerDimension != ledgerJournalTrans.LedgerDimension)
+        {
+            ledgerJournalTrans.LedgerDimension = newLedgerDimension;
+            ledgerJournalTrans.update();
+            updated = true;
+        }
+
+        return updated;
+    }
+
+    private DimensionDefault defaultDimension(LedgerJournalTrans _ledgerJournalTrans)
+    {
+        DimensionDefault defaultDimension;
+        DataAreaId company = this.lineCompany(_ledgerJournalTrans);
+
+        changecompany(company)
+        {
+            defaultDimension = LedgerDimensionFacade::getDefaultDimensionFromLedgerDimension(_ledgerJournalTrans.LedgerDimension);
+        }
+
+        return defaultDimension;
+    }
+
+    private DataAreaId lineCompany(LedgerJournalTrans _ledgerJournalTrans)
+    {
+        return _ledgerJournalTrans.Company ? _ledgerJournalTrans.Company : _ledgerJournalTrans.DataAreaId;
+    }
+
+    private int lineSign(LedgerJournalTrans _ledgerJournalTrans)
+    {
+        int sign;
+
+        if (_ledgerJournalTrans.AmountCurDebit > _ledgerJournalTrans.AmountCurCredit)
+        {
+            sign = 1;
+        }
+        else if (_ledgerJournalTrans.AmountCurCredit > _ledgerJournalTrans.AmountCurDebit)
+        {
+            sign = -1;
+        }
+
+        return sign;
+    }
+
+    private AmountCur lineAmount(LedgerJournalTrans _ledgerJournalTrans)
+    {
+        return _ledgerJournalTrans.AmountCurDebit + _ledgerJournalTrans.AmountCurCredit;
+    }
+
+    private AmountCur sumAmount(List _lines)
+    {
+        AmountCur total;
+        ListEnumerator lineEnumerator = _lines.getEnumerator();
+
+        while (lineEnumerator.moveNext())
+        {
+            LedgerJournalTrans ledgerJournalTrans = lineEnumerator.current();
+            total += this.lineAmount(ledgerJournalTrans);
+        }
+
+        return total;
+    }
+
+    private void addRecIds(Set _recIds, List _lines)
+    {
+        ListEnumerator lineEnumerator = _lines.getEnumerator();
+
+        while (lineEnumerator.moveNext())
+        {
+            LedgerJournalTrans ledgerJournalTrans = lineEnumerator.current();
+            _recIds.add(ledgerJournalTrans.RecId);
+        }
+    }
+
+    private void refreshCaller(Args _args)
+    {
+        if (_args && _args.caller() && _args.caller() is FormRun)
+        {
+            FormRun formRun = _args.caller() as FormRun;
+            FormDataSource ledgerJournalTrans_ds = formRun.dataSource(formDataSourceStr(LedgerJournalTransAllocation, LedgerJournalTrans));
+
+            if (ledgerJournalTrans_ds)
+            {
+                ledgerJournalTrans_ds.research(true);
+            }
+
+            Object formObject = formRun;
+            JournalForm journalForm = formObject.journalForm();
+            LedgerJournalFormTrans ledgerJournalFormTrans = journalForm as LedgerJournalFormTrans;
+
+            if (ledgerJournalFormTrans)
+            {
+                ledgerJournalFormTrans.enableButtonsActive();
+            }
+        }
+    }
+
+}
