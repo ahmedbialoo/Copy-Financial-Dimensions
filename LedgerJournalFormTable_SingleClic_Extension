@@ -1,0 +1,18 @@
+[ExtensionOf(classStr(LedgerJournalFormTable))]
+final class LedgerJournalFormTable_SingleClic_Extension
+{
+    protected boolean canLedgerJournalTableBePosted(LedgerJournalTable _ledgerJournalTable)
+    {
+        boolean canBePosted = next canLedgerJournalTableBePosted(_ledgerJournalTable);
+
+        if (canBePosted
+            && _ledgerJournalTable.JournalType == LedgerJournalType::Allocation
+            && LedgerJournalTable::find(_ledgerJournalTable.JournalNum).SC_SourceDimCopied != NoYes::Yes)
+        {
+            canBePosted = false;
+        }
+
+        return canBePosted;
+    }
+
+}
