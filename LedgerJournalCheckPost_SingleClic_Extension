@@ -1,0 +1,20 @@
+[ExtensionOf(classStr(LedgerJournalCheckPost))]
+final class LedgerJournalCheckPost_SingleClic_Extension
+{
+    //public boolean validate(Object _calledFrom)
+    //{
+    //    boolean isValid = next validate(_calledFrom);
+
+    //    if (isValid
+    //        && this.parmPost() == NoYes::Yes
+    //        && !this.parmSimulatePosting()
+    //        && this.ledgerJournalTable.JournalType == LedgerJournalType::Allocation
+    //        && this.ledgerJournalTable.SC_SourceDimCopied != NoYes::Yes)
+    //    {
+    //        isValid = checkFailed(strFmt("Journal %1 cannot be posted until Copy source dimensions has been run.", this.ledgerJournalTable.JournalNum));
+    //    }
+
+    //    return isValid;
+    //}
+
+}
