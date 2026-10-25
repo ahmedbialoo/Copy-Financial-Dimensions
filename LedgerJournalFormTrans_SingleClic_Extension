@@ -1,0 +1,34 @@
+[ExtensionOf(classStr(LedgerJournalFormTrans))]
+final class LedgerJournalFormTrans_SingleClic_Extension
+{
+    protected void setPostMenuButtonEnabled()
+    {
+        next setPostMenuButtonEnabled();
+
+        LedgerJournalTable ledgerJournalTable = this.ledgerJournalEngine.parmLedgerJournalTable();
+
+        if (ledgerJournalTable.JournalType == LedgerJournalType::Allocation
+            && LedgerJournalTable::find(ledgerJournalTable.JournalNum).SC_SourceDimCopied != NoYes::Yes)
+        {
+            FormFunctionButtonControl postButton = this.parmCtrlPostJournalButton();
+            FormMenuButtonControl postMenu = this.parmCtrlPostJournalMenu();
+            FormFunctionButtonControl postBatchButton = this.parmCtrlPostJournalBatchButton();
+
+            if (postButton)
+            {
+                postButton.enabled(false);
+            }
+
+            if (postMenu)
+            {
+                postMenu.enabled(false);
+            }
+
+            if (postBatchButton)
+            {
+                postBatchButton.enabled(false);
+            }
+        }
+    }
+
+}
